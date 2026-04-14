@@ -1,0 +1,40 @@
+{
+  "name": "typescript-offline-first-ai",
+  "version": "1.0.0",
+  "description": "TypeScript Mastery: Offline-First, Distributed Systems & AI Engineering — 20-lesson curriculum",
+  "type": "module",
+  "scripts": {
+    "lesson01": "tsx src/lesson01/index.ts",
+    "lesson02": "tsx src/lesson02/index.ts",
+    "lesson03": "tsx src/lesson03/index.ts",
+    "lesson04": "tsx src/lesson04/index.ts",
+    "lesson05": "tsx src/lesson05/index.ts",
+    "lesson06": "tsx src/lesson06/index.ts",
+    "lesson07": "tsx src/lesson07/index.ts",
+    "lesson08": "tsx src/lesson08/index.ts",
+    "lesson09": "tsx src/lesson09/index.ts",
+    "lesson10": "tsx src/lesson10/index.ts",
+    "lesson11": "tsx src/lesson11/index.ts",
+    "lesson12": "tsx src/lesson12/index.ts",
+    "lesson13": "tsx src/lesson13/index.ts",
+    "lesson14": "tsx src/lesson14/index.ts",
+    "lesson15": "tsx src/lesson15/index.ts",
+    "lesson16": "tsx src/lesson16/index.ts",
+    "lesson17": "tsx src/lesson17/index.ts",
+    "lesson18": "tsx src/lesson18/index.ts",
+    "lesson19": "tsx src/lesson19/index.ts",
+    "lesson20": "tsx src/lesson20/index.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/ws": "^8.5.10",
+    "tsx": "^4.15.0",
+    "typescript": "^5.5.0"
+  },
+  "dependencies": {
+    "eventemitter3": "^5.0.1",
+    "zod": "^3.23.8"
+  }
+}
