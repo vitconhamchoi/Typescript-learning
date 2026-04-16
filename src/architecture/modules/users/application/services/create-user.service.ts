@@ -5,18 +5,21 @@ import type { Monitor } from "../../../../shared/monitoring/monitor.js";
 import { ConflictError, type AppError } from "../../../../shared/errors.js";
 import { err, ok, type Result } from "../../../../shared/result.js";
 import type { UserDto } from "../../../../shared/contracts/user.js";
+import { BaseService } from "../../../../shared/base/base-service.js";
 
 import type { CreateUserCommand } from "../dto/create-user.dto.js";
 import { User } from "../../domain/entities/user.js";
 import type { UserRepository } from "../../domain/repositories/user-repository.js";
 import { EmailAddress } from "../../domain/value-objects/email-address.js";
 
-export class CreateUserService {
+export class CreateUserService extends BaseService {
   constructor(
     private readonly repository: UserRepository,
-    private readonly logger: Logger,
-    private readonly monitor: Monitor,
-  ) {}
+    logger: Logger,
+    monitor: Monitor,
+  ) {
+    super(logger, monitor);
+  }
 
   async execute(command: CreateUserCommand): Promise<Result<UserDto, AppError>> {
     const start = Date.now();
@@ -57,7 +60,7 @@ export class CreateUserService {
     };
 
     this.monitor.increment("user.create.success");
-    this.monitor.timing("user.create.latency_ms", Date.now() - start);
+    this.recordLatency("user.create.latency_ms", start);
     this.logger.info("User created", { userId: dto.id, email: dto.email });
 
     return ok(dto);

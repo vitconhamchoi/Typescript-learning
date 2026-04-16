@@ -11,11 +11,13 @@ Mẫu này bổ sung đầy đủ các phần còn thiếu để có thể dùng
 - Config management typed: `loadConfig` + `zod`
 - Dependency injection/IoC: `Container` + token theo module
 - Module structure rõ ràng: feature-based (`modules/users/*`)
+- Base architecture dùng chung: `BaseModule`, `BaseService`, `BaseRepository`, `BaseController`
 - Shared type FE-BE: `shared/contracts/user.ts`
 - Testing architecture: unit + integration test bằng `node:test`
 - Logging/monitoring abstraction: `Logger`, `Monitor`
 - Build pipeline strategy: `tsconfig` strict + `paths` alias + script lint/build/test riêng
 - Scalability pattern: modular monolith sẵn sàng tách service theo module token/contracts
+- Khi thêm module mới (todos/products...), chỉ cần tập trung vào domain + logic đặc thù, dùng lại base layers trong `shared/base/*`
 
 ## Chạy nhanh
 
