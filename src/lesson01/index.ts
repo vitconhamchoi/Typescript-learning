@@ -5,14 +5,19 @@
  *
  * Nội dung:
  *  - Conditional Types & Infer
+ *  - Utility Types (Partial/Pick/Omit/Record/Required)
  *  - Branded / Nominal Types
  *  - Template Literal Types & Prompt Templates
  *  - Mapped Types + satisfies
+ *  - Type Narrowing & Control Flow
  *  - Discriminated Unions & State Machine
+ *  - ESM module system & type-only imports
  *  - Function Overloads & Pipe
  *  - Type-safe LLM client skeleton
  *  - Typed Event Emitter
  */
+
+import { DEFAULT_MODEL_CONFIG, buildProviderUrl, type ModelRuntimeConfig } from "./module-system.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. CONDITIONAL TYPES & INFER
@@ -153,7 +158,7 @@ class TypedEventEmitter {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 5. MAPPED TYPES + satisfies
+// 5. MAPPED TYPES + UTILITY TYPES + satisfies
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface ProviderConfig {
@@ -167,6 +172,16 @@ interface ProviderConfig {
 type DeepReadonly<T> = { readonly [K in keyof T]: T[K] extends object ? DeepReadonly<T[K]> : T[K] };
 /** Recursively makes all properties optional */
 type DeepPartial<T> = { [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K] };
+// Built-in utility types for AI config:
+// - Partial: patch config khi rollout theo từng environment
+// - Pick/Omit: tách endpoint-limits và feature flags cho layer khác nhau
+// - Record: chuẩn hóa registry theo provider key
+// - Required: đảm bảo config final trước khi gọi provider API
+type ProviderPatch = Partial<ProviderConfig>;
+type ProviderIdentity = Pick<ProviderConfig, "endpoint" | "maxTokens">;
+type ProviderFlags = Omit<ProviderConfig, "endpoint" | "maxTokens">;
+type ProviderRegistry = Record<SupportedProvider, ProviderIdentity>;
+type StrictProviderConfig = Required<ProviderConfig>;
 
 type SupportedProvider = "openai" | "anthropic" | "gemini" | "mistral";
 
@@ -178,8 +193,62 @@ const PROVIDER_CONFIGS = {
   mistral:   { endpoint: "https://api.mistral.ai/v1",        maxTokens: 32_000,  supportsStreaming: true,  supportsTools: false },
 } satisfies Record<SupportedProvider, ProviderConfig>;
 
+const PROVIDER_REGISTRY = {
+  openai: { endpoint: PROVIDER_CONFIGS.openai.endpoint, maxTokens: PROVIDER_CONFIGS.openai.maxTokens },
+  anthropic: { endpoint: PROVIDER_CONFIGS.anthropic.endpoint, maxTokens: PROVIDER_CONFIGS.anthropic.maxTokens },
+  gemini: { endpoint: PROVIDER_CONFIGS.gemini.endpoint, maxTokens: PROVIDER_CONFIGS.gemini.maxTokens },
+  mistral: { endpoint: PROVIDER_CONFIGS.mistral.endpoint, maxTokens: PROVIDER_CONFIGS.mistral.maxTokens },
+} satisfies ProviderRegistry;
+
+function applyProviderPatch(base: StrictProviderConfig, patch: ProviderPatch): StrictProviderConfig {
+  const next: StrictProviderConfig = { ...base };
+  if (patch.endpoint !== undefined) next.endpoint = patch.endpoint;
+  if (patch.maxTokens !== undefined) next.maxTokens = patch.maxTokens;
+  if (patch.supportsStreaming !== undefined) next.supportsStreaming = patch.supportsStreaming;
+  if (patch.supportsTools !== undefined) next.supportsTools = patch.supportsTools;
+  return next;
+}
+
+function summarizeFlags(flags: ProviderFlags): string {
+  return `streaming=${flags.supportsStreaming} tools=${flags.supportsTools}`;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// 6. DISCRIMINATED UNIONS — AI PIPELINE STATE MACHINE
+// 6. TYPE NARROWING & CONTROL FLOW
+// ─────────────────────────────────────────────────────────────────────────────
+
+type LLMResult =
+  | { ok: true; data: CompletionResponse | AsyncIterable<TextChunk> }
+  | { ok: false; error: Error | string };
+
+function isCompletionResponse(value: unknown): value is CompletionResponse {
+  return typeof value === "object"
+    && value !== null
+    && "content" in value
+    && "usage" in value;
+}
+
+function normalizeError(error: Error | string): Error {
+  return typeof error === "string" ? new Error(error) : error;
+}
+
+function describeResult(result: LLMResult): string {
+  if (!result.ok) {
+    const err = normalizeError(result.error);
+    return `failed: ${err.message}`;
+  }
+  const payload = result.data;
+  if (isCompletionResponse(payload)) {
+    const content = typeof payload.content === "string"
+      ? payload.content
+      : JSON.stringify(payload.content);
+    return `complete: ${content.slice(0, 40)}`;
+  }
+  return "stream: AsyncIterable<TextChunk>";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 7. DISCRIMINATED UNIONS — AI PIPELINE STATE MACHINE
 // ─────────────────────────────────────────────────────────────────────────────
 
 type PipelineState =
@@ -235,7 +304,7 @@ class AIStateMachine {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 7. FUNCTION OVERLOADS & PIPE
+// 8. FUNCTION OVERLOADS & PIPE
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Type-safe pipeline builder
@@ -248,7 +317,7 @@ function pipe(value: unknown, ...fns: Array<(arg: unknown) => unknown>): unknown
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 8. TYPE-SAFE LLM CLIENT SKELETON
+// 9. TYPE-SAFE LLM CLIENT SKELETON
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface Message {
@@ -384,6 +453,33 @@ async function main() {
     (text: string) => ({ role: "user" as const, content: text }),
   );
   console.log(`  ${JSON.stringify(processedPrompt)}`);
+
+  // ── Utility types + control-flow narrowing demo ──
+  console.log("\n[Utility Types + Narrowing]");
+  const strictOpenAI: StrictProviderConfig = { ...PROVIDER_CONFIGS.openai };
+  const patchedOpenAI = applyProviderPatch(strictOpenAI, { supportsTools: false });
+  console.log(`  openai flags → ${summarizeFlags(patchedOpenAI)}`);
+  console.log(`  registry endpoint (openai) → ${PROVIDER_REGISTRY.openai.endpoint}`);
+  const okResult: LLMResult = {
+    ok: true,
+    data: {
+      id: "ok_1",
+      content: "Narrowing works correctly",
+      usage: { promptTokens: 1, completionTokens: 2, totalTokens: 3 },
+      finishReason: "stop",
+    },
+  };
+  console.log(`  ${describeResult(okResult)}`);
+  console.log(`  ${describeResult({ ok: false, error: "network timeout" })}`);
+
+  // ── ESM modules + type-only import demo ──
+  console.log("\n[ESM Module System]");
+  const runtimeCfg: ModelRuntimeConfig = {
+    ...DEFAULT_MODEL_CONFIG,
+    modelId: "gpt-4o-mini",
+    maxOutputTokens: 4096,
+  };
+  console.log(`  provider URL: ${buildProviderUrl(runtimeCfg.provider, "/chat/completions")}`);
 
   // ── Discriminated Unions / State Machine demo ──
   console.log("\n[AI State Machine]");

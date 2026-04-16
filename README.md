@@ -20,7 +20,7 @@ Khóa học 20 bài này được thiết kế cho các **senior developer** mu�
 
 | Bài | Chủ đề | Nội dung chính |
 |-----|--------|----------------|
-| [01](lessons/01-typescript-advanced-types-ai-foundation.md) | TypeScript Advanced Types & AI Foundation | Conditional types, template literals, infer, mapped types, branded types cho AI |
+| [01](lessons/01-typescript-advanced-types-ai-foundation.md) | TypeScript Advanced Types & AI Foundation | Conditional/mapped/utility types, infer, type narrowing, ESM module system, branded types cho AI |
 | [02](lessons/02-offline-first-architecture.md) | Offline-First Architecture Core Concepts | Storage strategies, sync patterns, conflict resolution philosophy |
 | [03](lessons/03-local-data-layer-indexeddb-pouchdb.md) | Local-First Data Layer | IndexedDB wrapper, PouchDB, Dexie.js với TypeScript |
 | [04](lessons/04-crdts-conflict-free-data.md) | CRDTs — Conflict-Free Replicated Data Types | LWW, G-Counter, OR-Set, Automerge, Yjs |
