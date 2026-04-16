@@ -18,10 +18,14 @@ import { TodoListScreen } from "./screens/todo-list/todo-list.screen.js";
 import { UserProfileScreen } from "./screens/user-profile/user-profile.screen.js";
 
 const TOKENS: {
+  readonly USER_REPOSITORY: Token<UserRepository>;
+  readonly TODO_REPOSITORY: Token<TodoRepository>;
   readonly USER_PROFILE_SCREEN: Token<UserProfileScreen>;
   readonly TODO_LIST_SCREEN: Token<TodoListScreen>;
   readonly LOGIN_SCREEN: Token<LoginScreen>;
 } = {
+  USER_REPOSITORY: Symbol("USER_REPOSITORY"),
+  TODO_REPOSITORY: Symbol("TODO_REPOSITORY"),
   USER_PROFILE_SCREEN: Symbol("USER_PROFILE_SCREEN"),
   TODO_LIST_SCREEN: Symbol("TODO_LIST_SCREEN"),
   LOGIN_SCREEN: Symbol("LOGIN_SCREEN"),
@@ -46,16 +50,16 @@ export const bootstrapApplication = (
   const logger = new ConsoleLogger({ service: "architecture-sample", env: configResult.value.NODE_ENV });
   const monitor = new InMemoryMonitor();
   const db = new InMemoryDatabase();
-  const userRepository: UserRepository = new InMemoryUserRepository(db);
-  const todoRepository: TodoRepository = new InMemoryTodoRepository(db);
 
   const container = new Container();
+  container.registerValue(TOKENS.USER_REPOSITORY, new InMemoryUserRepository(db));
+  container.registerValue(TOKENS.TODO_REPOSITORY, new InMemoryTodoRepository(db));
 
   container.registerFactory(
     TOKENS.USER_PROFILE_SCREEN,
     () => {
       const service = new CreateUserService(
-        userRepository,
+        container.resolve(TOKENS.USER_REPOSITORY),
         logger.child({ module: "users" }),
         monitor,
       );
@@ -67,7 +71,7 @@ export const bootstrapApplication = (
     TOKENS.TODO_LIST_SCREEN,
     () => {
       const service = new CreateTodoService(
-        todoRepository,
+        container.resolve(TOKENS.TODO_REPOSITORY),
         logger.child({ module: "todos" }),
         monitor,
       );
