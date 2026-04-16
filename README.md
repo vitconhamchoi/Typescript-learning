@@ -92,9 +92,9 @@ Khóa học 20 bài này được thiết kế cho các **senior developer** mu�
 
 ## 🧩 Architecture Remediation Sample
 
-Repository đã bổ sung thêm một mẫu kiến trúc production tại `src/architecture` để xử lý các vấn đề thường gặp như:
+Repository đã bổ sung thêm một mẫu kiến trúc production theo layered pattern tại `src/` với các thư mục `domain`, `application`, `infrastructure`, `presentation` để xử lý các vấn đề thường gặp như:
 
-- Layer architecture (controller/service/repository)
+- Layer architecture (presentation → application → domain → infrastructure)
 - Domain modeling (entity/value object/business rule)
 - DTO + contract typing giữa các layer
 - API response/error format chuẩn hoá
@@ -105,6 +105,8 @@ Repository đã bổ sung thêm một mẫu kiến trúc production tại `src/a
 - Shared types FE-BE
 - Unit/integration testing architecture
 - Build/lint/test scripts cho module kiến trúc
+- Presentation tổ chức theo screen (`login`, `todo-list`, `user-profile`)
+- Infrastructure dùng chung toàn dự án (`repositories`, `database`, `http-client`, `cache`, `config`)
 
 Chạy demo:
 
