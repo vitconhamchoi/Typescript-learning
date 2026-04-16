@@ -15,6 +15,9 @@ export const DEFAULT_MODEL_CONFIG: ModelRuntimeConfig = {
 };
 
 export function buildProviderUrl(provider: ProviderName, path: `/${string}`): string {
+  if (path === "/") {
+    throw new Error("Path must contain at least one segment");
+  }
   const baseByProvider: Record<ProviderName, string> = {
     openai: "https://api.openai.com/v1",
     anthropic: "https://api.anthropic.com/v1",

@@ -227,6 +227,9 @@ Các điểm quan trọng trong `tsconfig` cho ESM:
 
 - `module: "ESNext"`: xuất module chuẩn ESM
 - `moduleResolution: "bundler"`: tối ưu cho môi trường bundler/tooling hiện đại
+  - Dùng `bundler` khi code chạy qua Vite/Webpack/tsup/esbuild
+  - Dùng `node16`/`nodenext` khi chạy Node.js trực tiếp và cần mô phỏng chính xác cơ chế resolve của Node
+  - Repo này hiện dùng `moduleResolution: "bundler"` trong `tsconfig.json`
 - `target: "ES2022"` + `lib`: đồng bộ runtime APIs
 - `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`: tăng an toàn typing
 

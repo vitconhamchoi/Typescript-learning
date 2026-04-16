@@ -172,6 +172,11 @@ interface ProviderConfig {
 type DeepReadonly<T> = { readonly [K in keyof T]: T[K] extends object ? DeepReadonly<T[K]> : T[K] };
 /** Recursively makes all properties optional */
 type DeepPartial<T> = { [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K] };
+// Built-in utility types for AI config:
+// - Partial: patch config khi rollout theo từng environment
+// - Pick/Omit: tách endpoint-limits và feature flags cho layer khác nhau
+// - Record: chuẩn hóa registry theo provider key
+// - Required: đảm bảo config final trước khi gọi provider API
 type ProviderPatch = Partial<ProviderConfig>;
 type ProviderIdentity = Pick<ProviderConfig, "endpoint" | "maxTokens">;
 type ProviderFlags = Omit<ProviderConfig, "endpoint" | "maxTokens">;
@@ -188,15 +193,20 @@ const PROVIDER_CONFIGS = {
   mistral:   { endpoint: "https://api.mistral.ai/v1",        maxTokens: 32_000,  supportsStreaming: true,  supportsTools: false },
 } satisfies Record<SupportedProvider, ProviderConfig>;
 
-const PROVIDER_REGISTRY: ProviderRegistry = {
+const PROVIDER_REGISTRY = {
   openai: { endpoint: PROVIDER_CONFIGS.openai.endpoint, maxTokens: PROVIDER_CONFIGS.openai.maxTokens },
   anthropic: { endpoint: PROVIDER_CONFIGS.anthropic.endpoint, maxTokens: PROVIDER_CONFIGS.anthropic.maxTokens },
   gemini: { endpoint: PROVIDER_CONFIGS.gemini.endpoint, maxTokens: PROVIDER_CONFIGS.gemini.maxTokens },
   mistral: { endpoint: PROVIDER_CONFIGS.mistral.endpoint, maxTokens: PROVIDER_CONFIGS.mistral.maxTokens },
-};
+} satisfies ProviderRegistry;
 
 function applyProviderPatch(base: StrictProviderConfig, patch: ProviderPatch): StrictProviderConfig {
-  return { ...base, ...patch };
+  const next: StrictProviderConfig = { ...base };
+  if (patch.endpoint !== undefined) next.endpoint = patch.endpoint;
+  if (patch.maxTokens !== undefined) next.maxTokens = patch.maxTokens;
+  if (patch.supportsStreaming !== undefined) next.supportsStreaming = patch.supportsStreaming;
+  if (patch.supportsTools !== undefined) next.supportsTools = patch.supportsTools;
+  return next;
 }
 
 function summarizeFlags(flags: ProviderFlags): string {
@@ -229,7 +239,10 @@ function describeResult(result: LLMResult): string {
   }
   const payload = result.data;
   if (isCompletionResponse(payload)) {
-    return `complete: ${payload.content.slice(0, 40)}`;
+    const content = typeof payload.content === "string"
+      ? payload.content
+      : JSON.stringify(payload.content);
+    return `complete: ${content.slice(0, 40)}`;
   }
   return "stream: AsyncIterable<TextChunk>";
 }
