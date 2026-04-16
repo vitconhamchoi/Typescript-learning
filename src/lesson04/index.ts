@@ -81,12 +81,19 @@ class GCounter {
     }
   }
 
-  /** Check if this counter happens-before another (all entries ≤) */
+  /** Check if this counter strictly happens-before another (all entries ≤ and at least one <) */
   happensBefore(other: GCounter): boolean {
+    let strictlyLess = false;
     for (const [node, count] of this.counts) {
-      if (count > (other.counts.get(node) ?? 0)) return false;
+      const otherCount = other.counts.get(node) ?? 0;
+      if (count > otherCount) return false;
+      if (count < otherCount) strictlyLess = true;
     }
-    return true;
+    // Also check nodes only in other
+    for (const [node] of other.counts) {
+      if (!this.counts.has(node)) strictlyLess = true;
+    }
+    return strictlyLess;
   }
 
   toJSON(): Record<NodeId, number> {
