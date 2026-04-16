@@ -6,8 +6,11 @@
  * Nội dung:
  *  - NetworkStatus detection & typed events
  *  - Storage strategy (cache-first, network-first, stale-while-revalidate)
- *  - Operation queue with persistence
+ *  - Operation queue with persistence & exponential backoff
  *  - Sync state machine (FSM)
+ *  - Conflict resolution strategies (last-write-wins, field merge)
+ *  - Offline prompt cache with TTL
+ *  - Feature flags (offline-safe)
  */
 
 import { EventEmitter } from "eventemitter3";
@@ -192,7 +195,7 @@ class OfflineOperationQueue {
         await handler(op);
         this.queue = this.queue.filter(q => q.id !== op.id);
         console.log(`  [Queue] ✅ Flushed ${op.id}`);
-      } catch (err) {
+      } catch {
         op.attempts++;
         // Exponential back-off with jitter
         const backoff = Math.min(1000 * 2 ** op.attempts, 30_000);
@@ -245,6 +248,100 @@ class SyncStateMachine {
     console.log(`  [FSM] ${this._state} ──${event.type}──▶ ${nextState}`);
     this._state = nextState;
     return nextState;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 5. CONFLICT RESOLUTION STRATEGIES
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface Timestamped {
+  updatedAt: number; // epoch ms
+}
+
+interface ConflictResolver<T> {
+  resolve(local: T, remote: T): T;
+}
+
+class LastWriteWinsResolver<T extends Timestamped> implements ConflictResolver<T> {
+  resolve(local: T, remote: T): T {
+    return local.updatedAt >= remote.updatedAt ? local : remote;
+  }
+}
+
+class FieldMergeResolver<T extends Timestamped> implements ConflictResolver<T> {
+  resolve(local: T, remote: T): T {
+    // Take the newer version as base, merge updatedAt to max
+    const base = local.updatedAt >= remote.updatedAt ? local : remote;
+    return { ...base, updatedAt: Math.max(local.updatedAt, remote.updatedAt) };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 6. OFFLINE PROMPT CACHE
+// ─────────────────────────────────────────────────────────────────────────────
+
+class OfflinePromptCache {
+  private cache = new Map<string, { response: string; timestamp: number; ttl: number }>();
+
+  set(promptHash: string, response: string, ttlMs = 3_600_000): void {
+    this.cache.set(promptHash, { response, timestamp: Date.now(), ttl: ttlMs });
+  }
+
+  get(promptHash: string): string | null {
+    const entry = this.cache.get(promptHash);
+    if (!entry) return null;
+    if (Date.now() - entry.timestamp > entry.ttl) {
+      this.cache.delete(promptHash);
+      return null;
+    }
+    return entry.response;
+  }
+
+  get size(): number { return this.cache.size; }
+
+  static hash(prompt: string, model: string, temperature: number): string {
+    const content = `${model}:${temperature}:${prompt}`;
+    let hash = 0;
+    for (let i = 0; i < content.length; i++) {
+      hash = (hash << 5) - hash + content.charCodeAt(i);
+      hash |= 0;
+    }
+    return Math.abs(hash).toString(36);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 7. OFFLINE FEATURE FLAGS
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface FeatureFlag {
+  name: string;
+  enabled: boolean;
+  rolloutPercentage: number;
+}
+
+class OfflineFeatureFlags {
+  private flags = new Map<string, FeatureFlag>();
+
+  update(flags: FeatureFlag[]): void {
+    flags.forEach(f => this.flags.set(f.name, f));
+  }
+
+  isEnabled(flagName: string, userId: string): boolean {
+    const flag = this.flags.get(flagName);
+    if (!flag?.enabled) return false;
+    // Deterministic rollout based on userId hash
+    return this.hashUser(userId + flagName) < flag.rolloutPercentage;
+  }
+
+  private hashUser(input: string): number {
+    let hash = 0;
+    for (let i = 0; i < input.length; i++) {
+      hash = (hash << 5) - hash + input.charCodeAt(i);
+      hash |= 0;
+    }
+    return Math.abs(hash) % 100;
   }
 }
 
@@ -312,7 +409,59 @@ async function main() {
   fsm.transition({ type: "FAILURE", error: new Error("timeout") });
   console.log(`  Final state: ${fsm.state}`);
 
+  // ── Conflict Resolution ──
+  console.log("\n[Conflict Resolution]");
+
+  interface Note extends Timestamped {
+    id: string;
+    title: string;
+    body: string;
+    updatedAt: number;
+  }
+
+  const localNote: Note  = { id: "n1", title: "Local title", body: "local body", updatedAt: 1000 };
+  const remoteNote: Note = { id: "n1", title: "Remote title", body: "remote body", updatedAt: 2000 };
+
+  const lww = new LastWriteWinsResolver<Note>();
+  const winner = lww.resolve(localNote, remoteNote);
+  console.log(`  Last-write-wins winner: title="${winner.title}" (updatedAt=${winner.updatedAt})`);
+
+  const merger = new FieldMergeResolver<Note>();
+  const merged = merger.resolve(localNote, remoteNote);
+  console.log(`  Field-merge result: title="${merged.title}" (updatedAt=${merged.updatedAt})`);
+
+  // ── Offline Prompt Cache ──
+  console.log("\n[Offline Prompt Cache]");
+  const promptCache = new OfflinePromptCache();
+
+  const hash1 = OfflinePromptCache.hash("Hello world", "gpt-4o", 0.7);
+  promptCache.set(hash1, "Xin chào thế giới");
+  console.log(`  hash=${hash1}, cached="${promptCache.get(hash1)}"`);
+
+  const hash2 = OfflinePromptCache.hash("Different prompt", "gpt-4o", 0.7);
+  console.log(`  miss for hash=${hash2}: ${promptCache.get(hash2)}`);
+  console.log(`  Cache size: ${promptCache.size}`);
+
+  // ── Feature Flags ──
+  console.log("\n[Feature Flags]");
+  const featureFlags = new OfflineFeatureFlags();
+  featureFlags.update([
+    { name: "new-chat-ui", enabled: true, rolloutPercentage: 50 },
+    { name: "streaming-v2", enabled: true, rolloutPercentage: 100 },
+    { name: "beta-models", enabled: false, rolloutPercentage: 100 },
+  ]);
+
+  const users = ["usr_alice", "usr_bob", "usr_charlie", "usr_diana"];
+  for (const uid of users) {
+    const chatUI    = featureFlags.isEnabled("new-chat-ui", uid);
+    const streaming = featureFlags.isEnabled("streaming-v2", uid);
+    const beta      = featureFlags.isEnabled("beta-models", uid);
+    console.log(`  ${uid.padEnd(14)} new-chat-ui=${chatUI} streaming-v2=${streaming} beta-models=${beta}`);
+  }
+
   console.log("\n✅ Bài 2 hoàn thành!\n");
 }
 
 main().catch(console.error);
+
+export {};
