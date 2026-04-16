@@ -252,6 +252,181 @@ class OutboxPublisher {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 6. SAGA PATTERN — Document Processing
+// ─────────────────────────────────────────────────────────────────────────────
+
+type DocumentSagaState =
+  | { step: "idle" }
+  | { step: "uploading"; documentId: string }
+  | { step: "chunking"; documentId: string; totalChunks: number }
+  | { step: "embedding"; documentId: string; processedChunks: number; totalChunks: number }
+  | { step: "indexing"; documentId: string }
+  | { step: "complete"; documentId: string; duration: number }
+  | { step: "failed"; documentId: string; error: string; compensating: boolean };
+
+interface DocumentServices {
+  storage:     { upload(docName: string): Promise<string> };
+  chunker:     { chunk(docId: string): Promise<string[]> };
+  embedder:    { embed(chunks: string[]): Promise<number[][]> };
+  vectorStore: { index(docId: string, embeddings: number[][]): Promise<void> };
+  notifier:    { notify(docId: string, status: string): Promise<void> };
+}
+
+function createMockServices(): DocumentServices {
+  return {
+    storage: {
+      async upload(docName: string): Promise<string> {
+        return `doc_${docName.replace(/\s+/g, "_").toLowerCase()}`;
+      },
+    },
+    chunker: {
+      async chunk(_docId: string): Promise<string[]> {
+        return ["chunk_1", "chunk_2", "chunk_3", "chunk_4"];
+      },
+    },
+    embedder: {
+      async embed(chunks: string[]): Promise<number[][]> {
+        return chunks.map(() => [0.1, 0.2, 0.3]);
+      },
+    },
+    vectorStore: {
+      async index(_docId: string, _embeddings: number[][]): Promise<void> {
+        // mock index
+      },
+    },
+    notifier: {
+      async notify(docId: string, status: string): Promise<void> {
+        console.log(`    [Notifier] ${docId} → ${status}`);
+      },
+    },
+  };
+}
+
+class DocumentProcessingSaga {
+  private state: DocumentSagaState = { step: "idle" };
+  private startTime = 0;
+
+  constructor(private readonly services: DocumentServices) {}
+
+  async execute(docName: string): Promise<string> {
+    this.startTime = Date.now();
+    let currentDocId = "";
+
+    try {
+      // Step 1: Upload
+      this.state = { step: "uploading", documentId: "" };
+      const documentId = await this.services.storage.upload(docName);
+      currentDocId = documentId;
+      this.state = { step: "uploading", documentId };
+
+      // Step 2: Chunk
+      this.state = { step: "chunking", documentId, totalChunks: 0 };
+      const chunks = await this.services.chunker.chunk(documentId);
+      this.state = { step: "chunking", documentId, totalChunks: chunks.length };
+
+      // Step 3: Embed
+      this.state = { step: "embedding", documentId, processedChunks: 0, totalChunks: chunks.length };
+      const allEmbeddings: number[][] = [];
+      const BATCH_SIZE = 20;
+      for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
+        const batch = chunks.slice(i, i + BATCH_SIZE);
+        const embeddings = await this.services.embedder.embed(batch);
+        allEmbeddings.push(...embeddings);
+        this.state = {
+          step: "embedding", documentId,
+          processedChunks: Math.min(i + BATCH_SIZE, chunks.length),
+          totalChunks: chunks.length,
+        };
+      }
+
+      // Step 4: Index
+      this.state = { step: "indexing", documentId };
+      await this.services.vectorStore.index(documentId, allEmbeddings);
+
+      // Complete
+      const duration = Date.now() - this.startTime;
+      this.state = { step: "complete", documentId, duration };
+      await this.services.notifier.notify(documentId, "complete");
+      return documentId;
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      this.state = { step: "failed", documentId: currentDocId, error: errMsg, compensating: true };
+      await this.compensate(currentDocId);
+      this.state = { step: "failed", documentId: currentDocId, error: errMsg, compensating: false };
+      throw error;
+    }
+  }
+
+  private async compensate(documentId: string): Promise<void> {
+    if (!documentId) return;
+    console.log(`    [Saga] Compensating for ${documentId}`);
+    await this.services.notifier.notify(documentId, "failed");
+  }
+
+  getProgress(): { step: string; percentage: number } {
+    const s = this.state;
+    switch (s.step) {
+      case "idle":      return { step: "idle", percentage: 0 };
+      case "uploading": return { step: "Uploading...", percentage: 10 };
+      case "chunking":  return { step: "Chunking...", percentage: 25 };
+      case "embedding": {
+        const pct = s.totalChunks > 0 ? 25 + (s.processedChunks / s.totalChunks) * 60 : 25;
+        return { step: `Embedding (${s.processedChunks}/${s.totalChunks})...`, percentage: pct };
+      }
+      case "indexing":  return { step: "Indexing...", percentage: 90 };
+      case "complete":  return { step: "Complete!", percentage: 100 };
+      case "failed":    return { step: s.compensating ? "Rolling back..." : `Failed: ${s.error}`, percentage: -1 };
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 7. PROJECTION MANAGER — Catch-up Subscription
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface Projectable {
+  project(events: DomainEvent[]): void;
+}
+
+class ProjectionManager {
+  private position = 0;
+  private unsubscribe: (() => void) | null = null;
+
+  constructor(
+    private readonly store: EventStore,
+    private readonly projections: Projectable[],
+  ) {}
+
+  catchUp(): void {
+    const events = this.store.getAll(this.position);
+    if (events.length === 0) return;
+    for (const proj of this.projections) {
+      proj.project(events);
+    }
+    this.position += events.length;
+  }
+
+  startLive(): void {
+    this.catchUp();
+    const handler = (event: DomainEvent): void => {
+      for (const proj of this.projections) {
+        proj.project([event]);
+      }
+      this.position++;
+    };
+    this.store.on("appended", handler);
+    this.unsubscribe = () => this.store.off("appended", handler);
+  }
+
+  stop(): void {
+    if (this.unsubscribe) {
+      this.unsubscribe();
+      this.unsubscribe = null;
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // DEMO / RUN
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -296,12 +471,29 @@ async function main() {
     console.log(`  ✅ Caught conflict: ${(err as Error).message}`);
   }
 
-  // ── Projection ──
-  console.log("\n[Read Model Projection]");
+  // ── Projection Manager (catch-up + live) ──
+  console.log("\n[Projection Manager — catch-up]");
   const projection = new NoteProjection();
-  projection.project(store.getAll());
+  const manager = new ProjectionManager(store, [projection]);
+  manager.catchUp();
   const notes = projection.findAll();
   notes.forEach(n => console.log(`  ${n.id}: "${n.title}" tags=[${n.tags.join(",")}] deleted=${n.deleted} events=${n.eventCount}`));
+
+  console.log("\n[Projection Manager — live subscription]");
+  manager.startLive();
+  const note3 = NoteAggregate.create(store, "note_3", "usr_carol", "Live Note", "created while live");
+  note3.addTag("live");
+  const liveResult = projection.findById("note_3");
+  console.log(`  Live projected note_3: "${liveResult?.title ?? "?"}" tags=[${liveResult?.tags.join(",") ?? ""}]`);
+  manager.stop();
+
+  // ── Saga ──
+  console.log("\n[Saga — Document Processing]");
+  const saga = new DocumentProcessingSaga(createMockServices());
+  console.log(`  Before: ${saga.getProgress().step}`);
+  const docId = await saga.execute("my_report.pdf");
+  const progress = saga.getProgress();
+  console.log(`  After: ${progress.step} (${progress.percentage}%) → docId=${docId}`);
 
   // ── Outbox ──
   console.log("\n[Outbox Pattern]");
@@ -315,3 +507,5 @@ async function main() {
 }
 
 main().catch(console.error);
+
+export {};

@@ -9,6 +9,8 @@
  *  - LWW-Register (last-write-wins register)
  *  - OR-Set (observed-remove set)
  *  - LWW-Map (document / element map)
+ *  - Token usage tracker (G-Counter use case)
+ *  - Collaborative prompt library (OR-Set use case)
  *  - Merge / convergence guarantees
  */
 
@@ -25,6 +27,25 @@ function hlcNow(nodeId: NodeId, lastKnown?: HLC): HLC {
     return { wallTime, logical: 0, nodeId };
   }
   return { wallTime: lastKnown.wallTime, logical: lastKnown.logical + 1, nodeId };
+}
+
+/** Update local HLC when receiving a remote timestamp */
+function hlcUpdate(nodeId: NodeId, local: HLC, remote: HLC): HLC {
+  const wallTime = Date.now();
+  const maxWall = Math.max(wallTime, local.wallTime, remote.wallTime);
+
+  let logical: number;
+  if (maxWall === local.wallTime && maxWall === remote.wallTime) {
+    logical = Math.max(local.logical, remote.logical) + 1;
+  } else if (maxWall === local.wallTime) {
+    logical = local.logical + 1;
+  } else if (maxWall === remote.wallTime) {
+    logical = remote.logical + 1;
+  } else {
+    logical = 0;
+  }
+
+  return { wallTime: maxWall, logical, nodeId };
 }
 
 function hlcCompare(a: HLC, b: HLC): number {
@@ -58,6 +79,21 @@ class GCounter {
     for (const [node, count] of other.counts) {
       this.counts.set(node, Math.max(this.counts.get(node) ?? 0, count));
     }
+  }
+
+  /** Check if this counter strictly happens-before another (all entries ≤ and at least one <) */
+  happensBefore(other: GCounter): boolean {
+    let strictlyLess = false;
+    for (const [node, count] of this.counts) {
+      const otherCount = other.counts.get(node) ?? 0;
+      if (count > otherCount) return false;
+      if (count < otherCount) strictlyLess = true;
+    }
+    // Also check nodes only in other
+    for (const [node] of other.counts) {
+      if (!this.counts.has(node)) strictlyLess = true;
+    }
+    return strictlyLess;
   }
 
   toJSON(): Record<NodeId, number> {
@@ -176,6 +212,10 @@ class ORSet<T> {
       this.removed.add(uid);
     }
   }
+
+  size(): number {
+    return this.values().length;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -222,10 +262,84 @@ class LWWMap<T extends Record<string, unknown>> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 6. TOKEN USAGE TRACKER  (G-Counter use case for AI apps)
+// ─────────────────────────────────────────────────────────────────────────────
+
+class TokenUsageTracker {
+  private inputTokens: GCounter;
+  private outputTokens: GCounter;
+  private apiCalls: GCounter;
+
+  constructor(private deviceId: string) {
+    this.inputTokens = new GCounter(deviceId);
+    this.outputTokens = new GCounter(deviceId);
+    this.apiCalls = new GCounter(deviceId);
+  }
+
+  recordAPICall(input: number, output: number): void {
+    this.inputTokens.increment(input);
+    this.outputTokens.increment(output);
+    this.apiCalls.increment(1);
+  }
+
+  getStats() {
+    return {
+      totalInputTokens: this.inputTokens.value(),
+      totalOutputTokens: this.outputTokens.value(),
+      totalApiCalls: this.apiCalls.value(),
+      totalTokens: this.inputTokens.value() + this.outputTokens.value(),
+    };
+  }
+
+  merge(other: TokenUsageTracker): void {
+    this.inputTokens.merge(other.inputTokens);
+    this.outputTokens.merge(other.outputTokens);
+    this.apiCalls.merge(other.apiCalls);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 7. COLLABORATIVE PROMPT LIBRARY  (OR-Set use case for AI apps)
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface Prompt {
+  id: string;
+  name: string;
+  content: string;
+}
+
+class CollaborativePromptLibrary {
+  private prompts: ORSet<Prompt>;
+
+  constructor(nodeId: string) {
+    this.prompts = new ORSet(nodeId);
+  }
+
+  addPrompt(id: string, name: string, content: string): void {
+    this.prompts.add({ id, name, content });
+  }
+
+  removePrompt(id: string): void {
+    const prompt = this.prompts.values().find(p => p.id === id);
+    if (prompt) {
+      this.prompts.remove(prompt);
+    }
+  }
+
+  getPrompts(): Prompt[] {
+    return this.prompts.values();
+  }
+
+  merge(other: CollaborativePromptLibrary): void {
+    this.prompts.merge(other.prompts);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // DEMO / RUN
 // ─────────────────────────────────────────────────────────────────────────────
 
-(async () => {
+async function main() {
   console.log("\n══════════════════════════════════════");
   console.log(" Bài 4: CRDTs — Conflict-Free Data");
   console.log("══════════════════════════════════════\n");
@@ -235,6 +349,9 @@ class LWWMap<T extends Record<string, unknown>> {
   const gcA = new GCounter("nodeA");
   const gcB = new GCounter("nodeB");
   gcA.increment(5); gcB.increment(3); gcA.increment(2);
+  console.log(`  A before merge: ${gcA.value()} (expect 7)`);
+  console.log(`  B before merge: ${gcB.value()} (expect 3)`);
+  console.log(`  A happensBefore B: ${gcA.happensBefore(gcB)}`);
   gcA.merge(gcB);
   console.log(`  After merge: ${gcA.value()} (expect 10)`);
 
@@ -255,6 +372,15 @@ class LWWMap<T extends Record<string, unknown>> {
   regB.set("busy");
   regA.merge(regB);
   console.log(`  Status after merge: "${regA.value}" (expect "busy")`);
+
+  // ── HLC Update ──
+  console.log("\n[HLC Update — receiving remote timestamps]");
+  const localHLC = hlcNow("nodeA");
+  const remoteHLC = hlcNow("nodeB");
+  const updatedHLC = hlcUpdate("nodeA", localHLC, remoteHLC);
+  console.log(`  Local:   wall=${localHLC.wallTime} logical=${localHLC.logical}`);
+  console.log(`  Remote:  wall=${remoteHLC.wallTime} logical=${remoteHLC.logical}`);
+  console.log(`  Updated: wall=${updatedHLC.wallTime} logical=${updatedHLC.logical}`);
 
   // ── OR-Set ──
   console.log("\n[OR-Set]");
@@ -280,7 +406,36 @@ class LWWMap<T extends Record<string, unknown>> {
   docA.merge(docB);
   console.log("  Merged doc:", docA.toObject());
 
+  // ── Token Usage Tracker (G-Counter use case) ──
+  console.log("\n[Token Usage Tracker — G-Counter Use Case]");
+  const laptop = new TokenUsageTracker("laptop");
+  const phone = new TokenUsageTracker("phone");
+  laptop.recordAPICall(500, 200);
+  laptop.recordAPICall(300, 150);
+  phone.recordAPICall(100, 50);
+  console.log(`  Laptop stats:`, laptop.getStats());
+  console.log(`  Phone stats:`, phone.getStats());
+  laptop.merge(phone);
+  console.log(`  After merge:`, laptop.getStats());
+
+  // ── Collaborative Prompt Library (OR-Set use case) ──
+  console.log("\n[Collaborative Prompt Library — OR-Set Use Case]");
+  const aliceLib = new CollaborativePromptLibrary("alice");
+  const bobLib = new CollaborativePromptLibrary("bob");
+  aliceLib.addPrompt("p1", "Code Review", "Review this code for bugs...");
+  aliceLib.addPrompt("p2", "Summarize", "Summarize the following...");
+  bobLib.addPrompt("p3", "Translate", "Translate to Vietnamese...");
+  aliceLib.merge(bobLib);
+  console.log(`  Alice's library after merge:`);
+  aliceLib.getPrompts().forEach(p => console.log(`    [${p.id}] ${p.name}`));
+
+  // Remove and verify
+  aliceLib.removePrompt("p2");
+  console.log(`  After removing 'Summarize': ${aliceLib.getPrompts().length} prompts`);
+
   console.log("\n✅ Bài 4 hoàn thành!\n");
-})().catch(console.error);
+}
+
+main().catch(console.error);
 
 export {};

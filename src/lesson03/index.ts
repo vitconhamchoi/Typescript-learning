@@ -9,6 +9,10 @@
  *  - Query builder with type-safe filters
  *  - Optimistic update pattern
  *  - Sync watermark / checkpoint
+ *  - Response cache with TTL
+ *  - Embedding store with cosine similarity
+ *  - Migration system
+ *  - Sync manager (PouchDB-like)
  */
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -232,6 +236,233 @@ class SyncCheckpointStore {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 6. RESPONSE CACHE WITH TTL
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface CachedResponse {
+  cacheKey: string;
+  prompt: string;
+  response: string;
+  model: string;
+  temperature: number;
+  createdAt: ISO8601;
+  expiresAt: ISO8601;
+  hitCount: number;
+}
+
+class ResponseCache {
+  private cache = new Map<string, CachedResponse>();
+
+  private buildKey(prompt: string, model: string, temperature: number): string {
+    const content = `${model}:${temperature}:${prompt}`;
+    let hash = 5381;
+    for (let i = 0; i < content.length; i++) {
+      hash = ((hash << 5) + hash) + content.charCodeAt(i);
+      hash |= 0;
+    }
+    return Math.abs(hash).toString(36);
+  }
+
+  get(prompt: string, model: string, temperature: number): CachedResponse | null {
+    const key = this.buildKey(prompt, model, temperature);
+    const entry = this.cache.get(key);
+    if (!entry) return null;
+    if (new Date(entry.expiresAt) < new Date()) {
+      this.cache.delete(key);
+      return null;
+    }
+    entry.hitCount++;
+    return entry;
+  }
+
+  set(params: { prompt: string; model: string; temperature: number; response: string }, ttlMs = 3600000): void {
+    const key = this.buildKey(params.prompt, params.model, params.temperature);
+    this.cache.set(key, {
+      cacheKey: key,
+      prompt: params.prompt,
+      response: params.response,
+      model: params.model,
+      temperature: params.temperature,
+      createdAt: now(),
+      expiresAt: new Date(Date.now() + ttlMs).toISOString(),
+      hitCount: 0,
+    });
+  }
+
+  purgeExpired(): number {
+    let count = 0;
+    const currentTime = new Date();
+    for (const [key, entry] of this.cache) {
+      if (new Date(entry.expiresAt) < currentTime) {
+        this.cache.delete(key);
+        count++;
+      }
+    }
+    return count;
+  }
+
+  get size(): number { return this.cache.size; }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 7. EMBEDDING STORE WITH COSINE SIMILARITY
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface Embedding {
+  id: string;
+  documentId: string;
+  content: string;
+  vector: number[];
+  model: string;
+}
+
+function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length || a.length === 0) return 0;
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    const ai = a[i]!;
+    const bi = b[i]!;
+    dot += ai * bi;
+    normA += ai * ai;
+    normB += bi * bi;
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  return denom === 0 ? 0 : dot / denom;
+}
+
+class EmbeddingStore {
+  private embeddings: Embedding[] = [];
+
+  add(embedding: Embedding): void {
+    this.embeddings.push(embedding);
+  }
+
+  similaritySearch(
+    queryVector: number[],
+    topK = 5,
+    threshold = 0.7,
+  ): Array<Embedding & { similarity: number }> {
+    return this.embeddings
+      .map(e => ({ ...e, similarity: cosineSimilarity(queryVector, e.vector) }))
+      .filter(e => e.similarity >= threshold)
+      .sort((a, b) => b.similarity - a.similarity)
+      .slice(0, topK);
+  }
+
+  findByDocument(documentId: string): Embedding[] {
+    return this.embeddings.filter(e => e.documentId === documentId);
+  }
+
+  get size(): number { return this.embeddings.length; }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 8. MIGRATION SYSTEM
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface MigrationDef {
+  version: number;
+  name: string;
+  description: string;
+  up: () => Promise<void>;
+  down?: () => Promise<void>;
+}
+
+class MigrationRunner {
+  private currentVersion = 0;
+  private applied: number[] = [];
+
+  async run(migrations: MigrationDef[], targetVersion?: number): Promise<void> {
+    const maxVer = migrations.reduce((m, x) => Math.max(m, x.version), 0);
+    const target = targetVersion ?? maxVer;
+    const pending = migrations
+      .filter(m => m.version > this.currentVersion && m.version <= target)
+      .sort((a, b) => a.version - b.version);
+
+    for (const migration of pending) {
+      console.log(`  Running migration v${migration.version}: ${migration.name}`);
+      await migration.up();
+      this.currentVersion = migration.version;
+      this.applied.push(migration.version);
+    }
+  }
+
+  getStatus(): { currentVersion: number; applied: number[] } {
+    return { currentVersion: this.currentVersion, applied: [...this.applied] };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 9. SYNC MANAGER (PouchDB-like pattern)
+// ─────────────────────────────────────────────────────────────────────────────
+
+type SyncStatus = "idle" | "syncing" | "error" | "offline";
+type SyncDirection = "push" | "pull";
+
+interface SyncEvent<T> {
+  direction: SyncDirection;
+  entity: T;
+  action: "create" | "update" | "delete";
+}
+
+class SyncManager<T extends BaseEntity> {
+  private status: SyncStatus = "idle";
+  private localRepo: InMemoryRepository<T>;
+  private remoteRepo: InMemoryRepository<T>;
+  private history: SyncEvent<T>[] = [];
+  private listeners: Array<(status: SyncStatus) => void> = [];
+
+  constructor(local: InMemoryRepository<T>, remote: InMemoryRepository<T>) {
+    this.localRepo = local;
+    this.remoteRepo = remote;
+  }
+
+  onStatusChange(listener: (status: SyncStatus) => void): () => void {
+    this.listeners.push(listener);
+    return () => {
+      this.listeners = this.listeners.filter(l => l !== listener);
+    };
+  }
+
+  private setStatus(newStatus: SyncStatus): void {
+    this.status = newStatus;
+    this.listeners.forEach(l => l(newStatus));
+  }
+
+  async push(entity: T): Promise<void> {
+    this.setStatus("syncing");
+    try {
+      await this.remoteRepo.upsert(entity);
+      this.history.push({ direction: "push", entity, action: "update" });
+      this.setStatus("idle");
+    } catch {
+      this.setStatus("error");
+    }
+  }
+
+  async pull(id: string): Promise<T | null> {
+    this.setStatus("syncing");
+    try {
+      const entity = await this.remoteRepo.findById(id);
+      if (entity) {
+        await this.localRepo.upsert(entity);
+        this.history.push({ direction: "pull", entity, action: "update" });
+      }
+      this.setStatus("idle");
+      return entity;
+    } catch {
+      this.setStatus("error");
+      return null;
+    }
+  }
+
+  getStatus(): SyncStatus { return this.status; }
+  getHistory(): SyncEvent<T>[] { return [...this.history]; }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // DEMO / RUN
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -282,6 +513,64 @@ async function main() {
   checkpointStore.getAll().forEach(cp => {
     console.log(`  ${cp.collectionName}: seq=${cp.lastSequence} at=${cp.lastSyncedAt}`);
   });
+
+  // ── Response Cache ──
+  console.log("\n[Response Cache]");
+  const cache = new ResponseCache();
+  cache.set({ prompt: "Hello!", model: "gpt-4", temperature: 0.7, response: "Hi there!" });
+  cache.set({ prompt: "Explain CRDTs", model: "gpt-4", temperature: 0.7, response: "CRDTs are..." });
+  const hit = cache.get("Hello!", "gpt-4", 0.7);
+  const miss = cache.get("Unknown prompt", "gpt-4", 0.7);
+  console.log(`  Cache hit: "${hit?.response}" (hitCount=${hit?.hitCount})`);
+  console.log(`  Cache miss: ${miss}`);
+  console.log(`  Cache size: ${cache.size}`);
+
+  // ── Embedding Store ──
+  console.log("\n[Embedding Store — Cosine Similarity]");
+  const embeddingStore = new EmbeddingStore();
+  embeddingStore.add({ id: "e1", documentId: "doc1", content: "TypeScript is great", vector: [1, 0, 0, 0.5], model: "text-embedding" });
+  embeddingStore.add({ id: "e2", documentId: "doc1", content: "TypeScript generics",  vector: [0.9, 0.1, 0, 0.4], model: "text-embedding" });
+  embeddingStore.add({ id: "e3", documentId: "doc2", content: "Cooking recipes",      vector: [0, 0.8, 0.6, 0], model: "text-embedding" });
+
+  const searchResults = embeddingStore.similaritySearch([1, 0, 0, 0.5], 2, 0.5);
+  console.log(`  Query: [1,0,0,0.5] → ${searchResults.length} results:`);
+  searchResults.forEach(r => {
+    console.log(`    "${r.content}" similarity=${r.similarity.toFixed(3)}`);
+  });
+  console.log(`  Docs for doc1: ${embeddingStore.findByDocument("doc1").length} embeddings`);
+
+  // ── Migration System ──
+  console.log("\n[Migration System]");
+  const runner = new MigrationRunner();
+  const migrations: MigrationDef[] = [
+    { version: 1, name: "initial-schema", description: "Create initial tables", up: async () => { console.log("    → Created notes, tags tables"); } },
+    { version: 2, name: "add-pinning",    description: "Add isPinned field",    up: async () => { console.log("    → Added isPinned to notes"); } },
+    { version: 3, name: "add-branching",  description: "Add parentMessageId",   up: async () => { console.log("    → Added parentMessageId"); } },
+  ];
+  await runner.run(migrations);
+  const migStatus = runner.getStatus();
+  console.log(`  Current version: ${migStatus.currentVersion}, applied: [${migStatus.applied.join(", ")}]`);
+
+  // ── Sync Manager ──
+  console.log("\n[Sync Manager]");
+  const localRepo = new InMemoryRepository<Note>();
+  const remoteRepo = new InMemoryRepository<Note>();
+  const syncMgr = new SyncManager(localRepo, remoteRepo);
+
+  const statusChanges: SyncStatus[] = [];
+  syncMgr.onStatusChange(s => statusChanges.push(s));
+
+  const localNote = await localRepo.create({ title: "Local Note", body: "Written offline", tags: ["draft"], authorId: "usr_1" });
+  console.log(`  Created local note: "${localNote.title}"`);
+
+  await syncMgr.push(localNote);
+  const remoteCopy = await remoteRepo.findById(localNote.id);
+  console.log(`  After push, remote has: "${remoteCopy?.title}"`);
+
+  const pulled = await syncMgr.pull(localNote.id);
+  console.log(`  After pull: "${pulled?.title}"`);
+  console.log(`  Status transitions: [${statusChanges.join(" → ")}]`);
+  console.log(`  Sync history: ${syncMgr.getHistory().length} events`);
 
   console.log("\n✅ Bài 3 hoàn thành!\n");
 }
