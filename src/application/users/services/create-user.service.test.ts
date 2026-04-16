@@ -34,11 +34,11 @@ class InMemoryMonitor implements Monitor {
   private readonly counters = new Map<string, number>();
   private readonly timings = new Map<string, number[]>();
 
-  increment(metric: string, value: number = 1): void {
+  increment(metric: string, value: number = 1, _tags?: Record<string, string>): void {
     this.counters.set(metric, (this.counters.get(metric) ?? 0) + value);
   }
 
-  timing(metric: string, valueMs: number): void {
+  timing(metric: string, valueMs: number, _tags?: Record<string, string>): void {
     const current = this.timings.get(metric) ?? [];
     this.timings.set(metric, [...current, valueMs]);
   }
