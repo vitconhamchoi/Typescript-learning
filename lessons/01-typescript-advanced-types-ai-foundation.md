@@ -3,9 +3,10 @@
 ## Mục tiêu bài học
 
 - Nắm vững Conditional Types, Template Literal Types, Infer, Mapped Types
+- Nắm vững Utility Types (`Partial`, `Pick`, `Record`, `Omit`, `Required`)
 - Sử dụng Branded Types để tăng type safety cho AI systems
 - Xây dựng type-safe API client cho LLM providers
-- Hiểu cách TypeScript type system giúp model AI pipelines
+- Hiểu type narrowing, control-flow analysis và ESM module system với tsconfig nâng cao
 
 ---
 
@@ -115,6 +116,16 @@ type DeepPartial<T> = {
 };
 ```
 
+Utility types built-in giúp chuẩn hóa thao tác với cấu hình:
+
+```typescript
+type ProviderPatch = Partial<ProviderConfig>;
+type ProviderIdentity = Pick<ProviderConfig, "endpoint" | "maxTokens">;
+type ProviderFlags = Omit<ProviderConfig, "endpoint" | "maxTokens">;
+type ProviderRegistry = Record<SupportedProvider, ProviderIdentity>;
+type StrictProviderConfig = Required<ProviderConfig>;
+```
+
 Kết hợp `satisfies` để giữ literal types trong khi enforce shape:
 
 ```typescript
@@ -126,7 +137,34 @@ const PROVIDER_CONFIGS = {
 
 ---
 
-## 1.5 Discriminated Unions — AI State Machine
+## 1.5 Type Narrowing & Control Flow — Runtime Safety cho dữ liệu AI
+
+Type narrowing giúp biến dữ liệu `unknown`/union thành kiểu cụ thể thông qua guard:
+
+```typescript
+type LLMResult =
+  | { ok: true; data: CompletionResponse | AsyncIterable<TextChunk> }
+  | { ok: false; error: Error | string };
+
+function isCompletionResponse(value: unknown): value is CompletionResponse {
+  return typeof value === "object"
+    && value !== null
+    && "content" in value
+    && "usage" in value;
+}
+
+function describeResult(result: LLMResult): string {
+  if (!result.ok) return "failed";
+  if (isCompletionResponse(result.data)) return result.data.content;
+  return "stream";
+}
+```
+
+TypeScript thực hiện **control-flow analysis** qua `if`, `switch`, `in`, `typeof`, `instanceof`, giúp giảm lỗi runtime khi xử lý response AI không đồng nhất.
+
+---
+
+## 1.6 Discriminated Unions — AI State Machine
 
 Discriminated unions cho phép type narrowing tự động trong switch/if:
 
@@ -152,7 +190,7 @@ switch (state.status) {
 
 ---
 
-## 1.6 Function Overloads & Generics — Universal AI Client
+## 1.7 Function Overloads & Generics — Universal AI Client
 
 Function overloads cho phép return type thay đổi theo input:
 
@@ -177,16 +215,38 @@ const result = pipe(
 
 ---
 
+## 1.8 Module System (ESM) & tsconfig chuyên sâu
+
+Trong codebase thực tế, cần tách type/value rõ ràng theo ESM:
+
+```typescript
+import { DEFAULT_MODEL_CONFIG, buildProviderUrl, type ModelRuntimeConfig } from "./module-system.js";
+```
+
+Các điểm quan trọng trong `tsconfig` cho ESM:
+
+- `module: "ESNext"`: xuất module chuẩn ESM
+- `moduleResolution: "bundler"`: tối ưu cho môi trường bundler/tooling hiện đại
+- `target: "ES2022"` + `lib`: đồng bộ runtime APIs
+- `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`: tăng an toàn typing
+
+Khi mở rộng dự án Node.js thuần ESM, nên cân nhắc thêm `types: ["node"]` và quy ước rõ extension import (`.js`) để tránh mismatch giữa compile-time và runtime.
+
+---
+
 ## Tóm tắt Bài 1
 
 | Concept | Ứng dụng trong AI |
 |---------|-------------------|
 | Conditional Types | Typing streaming vs non-streaming responses |
+| Utility Types | Tạo patch/registry/config contracts nhanh và chính xác |
 | Branded Types | Type-safe IDs cho messages, conversations, models |
 | Template Literal Types | Type-safe prompt templates với variable extraction |
 | Mapped Types | Auto-generate validation schemas từ config types |
+| Type Narrowing | Xử lý an toàn các union/unknown responses từ AI provider |
 | Discriminated Unions | AI pipeline state machine |
 | Function Overloads | Universal AI client với type-safe overloads |
+| ESM + tsconfig | Kiểm soát boundary type/value và behavior module ở quy mô lớn |
 
 ## Bài tập thực hành
 
