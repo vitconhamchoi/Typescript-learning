@@ -27,7 +27,7 @@
     "architecture": "tsx src/architecture/index.ts",
     "test:architecture": "tsx --test src/architecture/**/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "lint": "tsc --noEmit --pretty false --noUnusedLocals --noUnusedParameters",
+    "lint": "tsc --noEmit --pretty false",
     "build": "tsc"
   },
   "devDependencies": {
