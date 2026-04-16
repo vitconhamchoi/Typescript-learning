@@ -163,8 +163,9 @@ interface ProviderConfig {
   supportsTools: boolean;
 }
 
-// Deep type utilities for config management
+/** Recursively makes all properties readonly */
 type DeepReadonly<T> = { readonly [K in keyof T]: T[K] extends object ? DeepReadonly<T[K]> : T[K] };
+/** Recursively makes all properties optional */
 type DeepPartial<T> = { [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K] };
 
 type SupportedProvider = "openai" | "anthropic" | "gemini" | "mistral";
