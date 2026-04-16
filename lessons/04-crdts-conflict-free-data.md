@@ -30,238 +30,62 @@ Sync → count = 5 hoặc 3?      Sync → increment(5) + increment(3) = 8 ✓
 
 ```typescript
 // G-Counter: mỗi node có counter riêng, chỉ increment
-type NodeId = string;
-
 class GCounter {
   private state: Map<NodeId, number>;
-
-  constructor(private nodeId: NodeId, initial?: Map<NodeId, number>) {
-    this.state = initial ? new Map(initial) : new Map([[nodeId, 0]]);
+  constructor(private nodeId: NodeId) {
+    this.state = new Map([[nodeId, 0]]);
   }
 
-  increment(by: number = 1): void {
-    if (by < 0) throw new Error("G-Counter only supports positive increments");
-    const current = this.state.get(this.nodeId) ?? 0;
-    this.state.set(this.nodeId, current + by);
+  increment(by = 1): void {
+    this.state.set(this.nodeId, (this.state.get(this.nodeId) ?? 0) + by);
   }
 
   value(): number {
     let total = 0;
-    for (const count of this.state.values()) {
-      total += count;
-    }
+    for (const count of this.state.values()) total += count;
     return total;
   }
 
-  // Merge: take max per node
-  merge(other: GCounter): GCounter {
-    const merged = new Map(this.state);
-    for (const [nodeId, count] of other.state) {
-      merged.set(nodeId, Math.max(merged.get(nodeId) ?? 0, count));
-    }
-    return new GCounter(this.nodeId, merged);
-  }
-
-  // For sync: serialize state
-  toJSON(): Record<NodeId, number> {
-    return Object.fromEntries(this.state);
-  }
-
-  static fromJSON(nodeId: NodeId, data: Record<NodeId, number>): GCounter {
-    return new GCounter(nodeId, new Map(Object.entries(data)));
-  }
-
-  // Compare: happens-before relation
-  happensBefore(other: GCounter): boolean {
-    for (const [nodeId, count] of this.state) {
-      if (count > (other.state.get(nodeId) ?? 0)) return false;
-    }
-    return true;
-  }
-}
-
-// Use case: tracking AI token usage across devices
-class TokenUsageTracker {
-  private inputTokens: GCounter;
-  private outputTokens: GCounter;
-  private apiCalls: GCounter;
-
-  constructor(deviceId: string) {
-    this.inputTokens = new GCounter(deviceId);
-    this.outputTokens = new GCounter(deviceId);
-    this.apiCalls = new GCounter(deviceId);
-  }
-
-  recordAPICall(inputTokens: number, outputTokens: number): void {
-    this.inputTokens.increment(inputTokens);
-    this.outputTokens.increment(outputTokens);
-    this.apiCalls.increment(1);
-  }
-
-  getStats() {
-    return {
-      totalInputTokens: this.inputTokens.value(),
-      totalOutputTokens: this.outputTokens.value(),
-      totalApiCalls: this.apiCalls.value(),
-      totalTokens: this.inputTokens.value() + this.outputTokens.value(),
-    };
-  }
-
-  merge(other: TokenUsageTracker): TokenUsageTracker {
-    this.inputTokens = this.inputTokens.merge(other.inputTokens);
-    this.outputTokens = this.outputTokens.merge(other.outputTokens);
-    this.apiCalls = this.apiCalls.merge(other.apiCalls);
-    return this;
+  // Merge: take max per node — guarantees convergence
+  merge(other: GCounter): void {
+    for (const [nodeId, count] of other.state)
+      this.state.set(nodeId, Math.max(this.state.get(nodeId) ?? 0, count));
   }
 }
 ```
+
+Use case: tracking AI token usage across devices (mỗi device increment riêng, merge khi sync).
 
 ---
 
 ## 4.3 LWW-Register (Last-Write-Wins Register)
 
 ```typescript
-// LWW Register với Hybrid Logical Clocks (HLC) để ordering chính xác hơn
-interface HLCTimestamp {
-  wallTime: number;   // Physical time (ms)
-  logical: number;    // Logical counter
-  nodeId: string;     // Tiebreaker
+// Hybrid Logical Clock — ordering chính xác hơn wall clock
+type HLC = { wallTime: number; logical: number; nodeId: string };
+
+function hlcCompare(a: HLC, b: HLC): number {
+  if (a.wallTime !== b.wallTime) return a.wallTime - b.wallTime;
+  if (a.logical !== b.logical) return a.logical - b.logical;
+  return a.nodeId.localeCompare(b.nodeId);
 }
 
-class HybridLogicalClock {
-  private logical = 0;
-  private lastWallTime = 0;
-
-  constructor(private nodeId: string) {}
-
-  now(): HLCTimestamp {
-    const wallTime = Date.now();
-    if (wallTime > this.lastWallTime) {
-      this.logical = 0;
-      this.lastWallTime = wallTime;
-    } else {
-      this.logical++;
-    }
-    return { wallTime: this.lastWallTime, logical: this.logical, nodeId: this.nodeId };
-  }
-
-  update(received: HLCTimestamp): HLCTimestamp {
-    const wallTime = Date.now();
-    const maxWall = Math.max(wallTime, received.wallTime);
-    
-    if (maxWall === this.lastWallTime && maxWall === received.wallTime) {
-      this.logical = Math.max(this.logical, received.logical) + 1;
-    } else if (maxWall === this.lastWallTime) {
-      this.logical++;
-    } else if (maxWall === received.wallTime) {
-      this.logical = received.logical + 1;
-    } else {
-      this.logical = 0;
-    }
-    
-    this.lastWallTime = maxWall;
-    return { wallTime: maxWall, logical: this.logical, nodeId: this.nodeId };
-  }
-
-  static compare(a: HLCTimestamp, b: HLCTimestamp): number {
-    if (a.wallTime !== b.wallTime) return a.wallTime - b.wallTime;
-    if (a.logical !== b.logical) return a.logical - b.logical;
-    return a.nodeId.localeCompare(b.nodeId);
-  }
-}
-
-// LWW Register
+// LWW Register — last write (by HLC timestamp) wins on merge
 class LWWRegister<T> {
-  private timestamp: HLCTimestamp;
-  private clock: HybridLogicalClock;
-
-  constructor(
-    private value: T,
-    nodeId: string
-  ) {
-    this.clock = new HybridLogicalClock(nodeId);
-    this.timestamp = this.clock.now();
-  }
+  private entry: { value: T; timestamp: HLC };
 
   set(value: T): void {
-    this.value = value;
-    this.timestamp = this.clock.now();
+    this.entry = { value, timestamp: hlcNow(this.nodeId) };
   }
 
-  get(): T {
-    return this.value;
-  }
-
-  merge(other: LWWRegister<T>): LWWRegister<T> {
-    if (HybridLogicalClock.compare(other.timestamp, this.timestamp) > 0) {
-      this.value = other.value;
-      this.timestamp = this.clock.update(other.timestamp);
-    }
-    return this;
-  }
-
-  toJSON() {
-    return { value: this.value, timestamp: this.timestamp };
-  }
-}
-
-// LWW Map: map of LWW Registers
-class LWWMap<V> {
-  private entries: Map<string, LWWRegister<V | null>>;
-
-  constructor(private nodeId: string) {
-    this.entries = new Map();
-  }
-
-  set(key: string, value: V): void {
-    if (!this.entries.has(key)) {
-      this.entries.set(key, new LWWRegister<V | null>(value, this.nodeId));
-    } else {
-      this.entries.get(key)!.set(value);
-    }
-  }
-
-  delete(key: string): void {
-    if (!this.entries.has(key)) {
-      this.entries.set(key, new LWWRegister<V | null>(null, this.nodeId));
-    } else {
-      this.entries.get(key)!.set(null);
-    }
-  }
-
-  get(key: string): V | undefined {
-    const reg = this.entries.get(key);
-    const value = reg?.get();
-    return value !== null && value !== undefined ? value : undefined;
-  }
-
-  has(key: string): boolean {
-    return this.get(key) !== undefined;
-  }
-
-  entries(): Array<[string, V]> {
-    const result: Array<[string, V]> = [];
-    for (const [key, reg] of this.entries) {
-      const value = reg.get();
-      if (value !== null && value !== undefined) {
-        result.push([key, value]);
-      }
-    }
-    return result;
-  }
-
-  merge(other: LWWMap<V>): LWWMap<V> {
-    for (const [key, otherReg] of other.entries) {
-      if (!this.entries.has(key)) {
-        this.entries.set(key, otherReg);
-      } else {
-        this.entries.get(key)!.merge(otherReg);
-      }
-    }
-    return this;
+  merge(other: LWWRegister<T>): void {
+    if (hlcCompare(other.entry.timestamp, this.entry.timestamp) > 0)
+      this.entry = { ...other.entry };
   }
 }
 ```
+
+LWW-Map mở rộng pattern này thành document CRDT — mỗi field là một LWW-Register riêng biệt.
 
 ---
 
@@ -270,105 +94,32 @@ class LWWMap<V> {
 OR-Set cho phép cả add và remove mà không conflict:
 
 ```typescript
-// Unique tag per element per operation
-interface Tag {
-  nodeId: string;
-  unique: string;
-}
-
+// OR-Set: mỗi add tạo unique tag, remove chỉ xóa tags đã observe
 class ORSet<T> {
-  // Map từ element -> set of tags (tags = evidence element được added)
-  private state: Map<string, { value: T; tags: Set<string> }>;
+  private added = new Map<string, { value: T; uid: string }>();
+  private removed = new Set<string>();
 
-  constructor(private nodeId: string) {
-    this.state = new Map();
+  add(value: T): void {
+    const uid = `${this.nodeId}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    this.added.set(uid, { value, uid });
   }
 
-  private elementKey(element: T): string {
-    return JSON.stringify(element);
+  remove(value: T): void {
+    for (const [uid, entry] of this.added)
+      if (JSON.stringify(entry.value) === JSON.stringify(value))
+        this.removed.add(uid);
   }
 
-  add(element: T): void {
-    const key = this.elementKey(element);
-    const tag = `${this.nodeId}:${crypto.randomUUID()}`;
-    
-    if (!this.state.has(key)) {
-      this.state.set(key, { value: element, tags: new Set([tag]) });
-    } else {
-      this.state.get(key)!.tags.add(tag);
-    }
-  }
-
-  remove(element: T): void {
-    const key = this.elementKey(element);
-    // Remove by clearing all tags (not the entry itself)
-    // This allows re-add to work correctly
-    const entry = this.state.get(key);
-    if (entry) {
-      entry.tags.clear();
-    }
-  }
-
-  has(element: T): boolean {
-    const key = this.elementKey(element);
-    const entry = this.state.get(key);
-    return entry !== undefined && entry.tags.size > 0;
+  // Merge: union of adds + union of removes
+  merge(other: ORSet<T>): void {
+    for (const [uid, entry] of other.added) this.added.set(uid, entry);
+    for (const uid of other.removed) this.removed.add(uid);
   }
 
   values(): T[] {
-    return Array.from(this.state.values())
-      .filter((entry) => entry.tags.size > 0)
-      .map((entry) => entry.value);
-  }
-
-  // Merge: union of tags
-  merge(other: ORSet<T>): ORSet<T> {
-    for (const [key, otherEntry] of other.state) {
-      if (!this.state.has(key)) {
-        this.state.set(key, {
-          value: otherEntry.value,
-          tags: new Set(otherEntry.tags),
-        });
-      } else {
-        const entry = this.state.get(key)!;
-        for (const tag of otherEntry.tags) {
-          entry.tags.add(tag);
-        }
-      }
-    }
-    return this;
-  }
-
-  size(): number {
-    return this.values().length;
-  }
-}
-
-// Use case: Collaborative AI prompt library
-class CollaborativePromptLibrary {
-  private prompts: ORSet<{ id: string; name: string; content: string }>;
-
-  constructor(nodeId: string) {
-    this.prompts = new ORSet(nodeId);
-  }
-
-  addPrompt(id: string, name: string, content: string): void {
-    this.prompts.add({ id, name, content });
-  }
-
-  removePrompt(id: string): void {
-    const prompt = this.prompts.values().find((p) => p.id === id);
-    if (prompt) {
-      this.prompts.remove(prompt);
-    }
-  }
-
-  getPrompts(): Array<{ id: string; name: string; content: string }> {
-    return this.prompts.values();
-  }
-
-  merge(other: CollaborativePromptLibrary): void {
-    this.prompts.merge(other.prompts);
+    return [...this.added.entries()]
+      .filter(([uid]) => !this.removed.has(uid))
+      .map(([, e]) => e.value);
   }
 }
 ```
@@ -380,108 +131,27 @@ class CollaborativePromptLibrary {
 Automerge handles complex data structures automatically:
 
 ```typescript
-import * as Automerge from "@automerge/automerge";
-
-// Define document types
+// Define document type
 interface AIConfig {
   systemPrompt: string;
   temperature: number;
-  maxTokens: number;
   tools: string[];
-  knowledgeBases: Record<string, boolean>;
-  userPreferences: {
-    theme: "light" | "dark";
-    language: string;
-    notifications: boolean;
-  };
 }
 
-// Create initial document
-function createAIConfig(): Automerge.Doc<AIConfig> {
-  return Automerge.from<AIConfig>({
-    systemPrompt: "You are a helpful assistant.",
-    temperature: 0.7,
-    maxTokens: 2048,
-    tools: [],
-    knowledgeBases: {},
-    userPreferences: {
-      theme: "dark",
-      language: "en",
-      notifications: true,
-    },
-  });
-}
+// Automerge change + merge pattern
+let doc = Automerge.from<AIConfig>({
+  systemPrompt: "You are helpful.",
+  temperature: 0.7,
+  tools: [],
+});
 
-// Automerge-based collaborative config manager
-class CollaborativeAIConfig {
-  private doc: Automerge.Doc<AIConfig>;
+doc = Automerge.change(doc, (d) => {
+  d.tools.push("web-search");
+  d.temperature = 0.9;
+});
 
-  constructor(initial?: Uint8Array) {
-    if (initial) {
-      this.doc = Automerge.load<AIConfig>(initial);
-    } else {
-      this.doc = createAIConfig();
-    }
-  }
-
-  updateSystemPrompt(prompt: string): Uint8Array {
-    const [newDoc, changes] = Automerge.applyChanges(
-      this.doc,
-      Automerge.getAllChanges(
-        Automerge.change(this.doc, (d) => {
-          d.systemPrompt = prompt;
-        })
-      )
-    );
-    this.doc = newDoc;
-    return Automerge.save(this.doc);
-  }
-
-  addTool(toolName: string): void {
-    this.doc = Automerge.change(this.doc, (d) => {
-      if (!d.tools.includes(toolName)) {
-        d.tools.push(toolName);
-      }
-    });
-  }
-
-  removeTool(toolName: string): void {
-    this.doc = Automerge.change(this.doc, (d) => {
-      const idx = d.tools.indexOf(toolName);
-      if (idx >= 0) {
-        d.tools.splice(idx, 1);
-      }
-    });
-  }
-
-  setKnowledgeBase(name: string, enabled: boolean): void {
-    this.doc = Automerge.change(this.doc, (d) => {
-      d.knowledgeBases[name] = enabled;
-    });
-  }
-
-  // Merge changes from another peer
-  merge(remoteChanges: Uint8Array): void {
-    const remoteDoc = Automerge.load<AIConfig>(remoteChanges);
-    this.doc = Automerge.merge(this.doc, remoteDoc);
-  }
-
-  // Get binary for network transmission
-  serialize(): Uint8Array {
-    return Automerge.save(this.doc);
-  }
-
-  // Get only new changes since last sync
-  getChanges(since?: Uint8Array): Uint8Array[] {
-    if (!since) return Automerge.getAllChanges(this.doc);
-    const sinceDoc = Automerge.load<AIConfig>(since);
-    return Automerge.getChanges(sinceDoc, this.doc);
-  }
-
-  getConfig(): Readonly<AIConfig> {
-    return this.doc;
-  }
-}
+// Merge two peers — conflicts resolved automatically
+const merged = Automerge.merge(docA, docB);
 ```
 
 ---
@@ -491,105 +161,22 @@ class CollaborativeAIConfig {
 Yjs là lựa chọn tốt nhất cho collaborative text editing (shared prompts, documents):
 
 ```typescript
-import * as Y from "yjs";
-import { WebsocketProvider } from "y-websocket";
-import { IndexeddbPersistence } from "y-indexeddb";
+// Yjs shared types — CRDT-backed collaborative data
+const ydoc = new Y.Doc();
+const sharedPrompt = ydoc.getText("systemPrompt");
+const sharedConfig = ydoc.getMap("config");
 
-// Collaborative AI workspace với Yjs
-class CollaborativeAIWorkspace {
-  private ydoc: Y.Doc;
-  private wsProvider: WebsocketProvider | null = null;
-  private idbProvider: IndexeddbPersistence;
-  
-  // Shared types
-  private sharedPrompt: Y.Text;
-  private sharedConfig: Y.Map<unknown>;
-  private sharedMessages: Y.Array<unknown>;
-  private awareness: ReturnType<WebsocketProvider["awareness"]["getLocalState"]>;
+// Text operations — mỗi character có unique ID
+sharedPrompt.insert(0, "You are a helpful assistant.");
 
-  constructor(
-    workspaceId: string,
-    userId: string,
-    userName: string
-  ) {
-    this.ydoc = new Y.Doc();
-    
-    // Get shared types
-    this.sharedPrompt = this.ydoc.getText("systemPrompt");
-    this.sharedConfig = this.ydoc.getMap("config");
-    this.sharedMessages = this.ydoc.getArray("messages");
+// Observe real-time changes
+sharedPrompt.observe((event) => {
+  console.log("Text changed:", event.delta);
+});
 
-    // Local persistence (offline)
-    this.idbProvider = new IndexeddbPersistence(
-      `workspace:${workspaceId}`,
-      this.ydoc
-    );
-
-    this.idbProvider.on("synced", () => {
-      console.log("Content loaded from IndexedDB");
-    });
-  }
-
-  connectToRoom(serverUrl: string, workspaceId: string): void {
-    this.wsProvider = new WebsocketProvider(
-      serverUrl,
-      workspaceId,
-      this.ydoc,
-      {
-        connect: true,
-        resyncInterval: 10000,
-      }
-    );
-
-    this.wsProvider.on("status", (event: { status: string }) => {
-      console.log("Connection status:", event.status);
-    });
-  }
-
-  // Type-safe text operations
-  insertText(index: number, text: string): void {
-    this.sharedPrompt.insert(index, text);
-  }
-
-  deleteText(index: number, length: number): void {
-    this.sharedPrompt.delete(index, length);
-  }
-
-  getText(): string {
-    return this.sharedPrompt.toString();
-  }
-
-  // Config operations
-  setConfig(key: string, value: unknown): void {
-    this.sharedConfig.set(key, value);
-  }
-
-  getConfig(key: string): unknown {
-    return this.sharedConfig.get(key);
-  }
-
-  // Observe changes
-  onTextChange(callback: (delta: Y.YTextEvent) => void): () => void {
-    this.sharedPrompt.observe(callback);
-    return () => this.sharedPrompt.unobserve(callback);
-  }
-
-  onConfigChange(callback: (event: Y.YMapEvent<unknown>) => void): () => void {
-    this.sharedConfig.observe(callback);
-    return () => this.sharedConfig.unobserve(callback);
-  }
-
-  // Undo/Redo
-  createUndoManager(): Y.UndoManager {
-    return new Y.UndoManager([this.sharedPrompt, this.sharedConfig]);
-  }
-
-  destroy(): void {
-    this.wsProvider?.destroy();
-    this.idbProvider.destroy();
-    this.ydoc.destroy();
-  }
-}
+// Undo/Redo support
+const undoManager = new Y.UndoManager([sharedPrompt, sharedConfig]);
+undoManager.undo();
 ```
 
 ---
