@@ -25,7 +25,7 @@
     "lesson19": "tsx src/lesson19/index.ts",
     "lesson20": "tsx src/lesson20/index.ts",
     "architecture": "tsx src/architecture/index.ts",
-    "test:architecture": "tsx --test src/architecture/**/*.test.ts",
+    "test:architecture": "tsx --test \"src/architecture/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit --pretty false",
     "build": "tsc"

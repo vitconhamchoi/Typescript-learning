@@ -7,7 +7,7 @@ import type { UserRepository } from "../../../users/domain/repositories/user-rep
 import type { User } from "../../../users/domain/entities/user.js";
 import { CreateUserService } from "./create-user.service.js";
 
-class UserRepositoryMock implements UserRepository {
+class MockUserRepository implements UserRepository {
   private readonly users = new Map<string, User>();
 
   async findByEmail(email: string): Promise<User | null> {
@@ -21,7 +21,7 @@ class UserRepositoryMock implements UserRepository {
 
 test("CreateUserService should create user with valid payload", async () => {
   const service = new CreateUserService(
-    new UserRepositoryMock(),
+    new MockUserRepository(),
     new ConsoleLogger({ test: "unit" }),
     new InMemoryMonitor(),
   );
