@@ -90,6 +90,29 @@ Khóa học 20 bài này được thiết kế cho các **senior developer** mu�
 3. Mỗi bài có phần **"Thực hành"** để bạn tự code
 4. Code ví dụ trong mỗi bài là production-ready và có thể copy trực tiếp
 
+## 🧩 Architecture Remediation Sample
+
+Repository đã bổ sung thêm một mẫu kiến trúc production tại `src/architecture` để xử lý các vấn đề thường gặp như:
+
+- Layer architecture (controller/service/repository)
+- Domain modeling (entity/value object/business rule)
+- DTO + contract typing giữa các layer
+- API response/error format chuẩn hoá
+- Validation bằng Zod
+- Typed error + result pattern
+- Config typing + DI/IoC
+- Logging/monitoring abstraction
+- Shared types FE-BE
+- Unit/integration testing architecture
+- Build/lint/test scripts cho module kiến trúc
+
+Chạy demo:
+
+```bash
+npm run architecture
+npm run test:architecture
+```
+
 ## 📋 Yêu cầu tiên quyết
 
 - TypeScript 5.x
